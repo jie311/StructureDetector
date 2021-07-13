@@ -1,5 +1,6 @@
 from ..utils import *
 import torch
+from torch import Tensor
 from collections import defaultdict
 
 
@@ -15,55 +16,69 @@ class Decoder:
         self.max_objects = args.max_objects  # K
         self.max_parts = args.max_parts  # P
 
-    def decode_heatmaps(self, heatmaps, offsets, max_objects, embeddings=None):
+    def decode_heatmaps(self, heatmaps: Tensor, offsets: Tensor, max_objects: int, embeddings: Tensor = None):
         heatmaps = clamped_sigmoid(heatmaps)  # (B, C, H/R, W/R)
         heatmaps = nms(heatmaps)  # (B, C, H/R, W/R)
-        scores, inds, labels, ys, xs = topk(heatmaps, k=max_objects)  # (C, K)
+        scores, inds, labels, ys, xs = topk(heatmaps, k=max_objects)  # (B, K)
+        locs = torch.stack((xs, ys), dim=2)  # (B, K, 2)
         offsets = transpose_and_gather(offsets, inds)  # (B, K, 2)
-        xs += offsets[..., 0]
-        ys += offsets[..., 1]
+        locs += offsets
 
         if embeddings is not None:
             offsets = transpose_and_gather(embeddings, inds)
-            exs = xs + offsets[..., 0]
-            eys = ys + offsets[..., 1]
-            return xs, ys, scores, labels.float(), exs, eys
+            orgs = locs + offsets
+            return locs, scores, labels, orgs
 
-        return xs, ys, scores, labels.float()
+        return locs, scores, labels
 
-    def associate(self, xs, ys, exs, eys, scores, p_scores, ct, dt):
-        part_mask = (p_scores > ct).float()  # (B, P)
-        ori_xs = (-1e6*(1 - part_mask) + part_mask * exs)  # (B, P)
-        ori_ys = (-1e6*(1 - part_mask) + part_mask * eys)  # (B, P)
+    def associate(self, locs: Tensor, orgs: Tensor):
+        locs = locs.unsqueeze(2).expand(-1, -1, self.max_parts, -1)  # (B, K, P, 2)
+        orgs = orgs.unsqueeze(1).expand(-1, self.max_objects, -1, -1)  # (B, K, P, 2)
+        sq_distance = torch.hypot(*torch.unbind(orgs - locs, dim=-1))  # (B, K, P)
+        return sq_distance.min(dim=1)  # (B, P)
 
-        anchor_mask = (scores > ct).float()  # (B, K)
-        pos_xs = (1e6*(1 - anchor_mask) + anchor_mask * xs)  # (B, K)
-        pos_ys = (1e6*(1 - anchor_mask) + anchor_mask * ys)  # (B, K)
-
-        anchor_pos = torch.stack((pos_xs, pos_ys), dim=-1)  # (B, K, 2)
-        origins = torch.stack((ori_xs, ori_ys), dim=-1)  # (B, P, 2)
-
-        anchor_pos = anchor_pos.unsqueeze(2).expand(-1, -1, self.max_parts, -1)  # (B, K, P, 2)
-        origins = origins.unsqueeze(1).expand(-1, self.max_objects, -1, -1)  # (B, K, P, 2)
-
-        sq_distance = torch.hypot(*torch.unbind(origins - anchor_pos, dim=-1))  # (B, K, P)
-        vals, inds = sq_distance.min(dim=1)  # (B, P)
-
-        return inds, vals < dt
-
-    def decode(self, input: torch.Tensor):
-        ct = self.args.conf_threshold
-        dt = self.args.decoder_dist_thresh
-
+    def decode(self, input: Tensor):
         out_h, out_w = input["anchor_hm"].shape[2:]  # H/R, W/R
         in_h, in_w = int(self.down_ratio * out_h), int(self.down_ratio * out_w)  # H, W
-        dt *= min(out_w, out_h)
 
-        xs, ys, scores, labels = self.decode_heatmaps(input["anchor_hm"], input["offsets"], self.max_objects)
-        pxs, pys, p_scores, p_labels, exs, eys = self.decode_heatmaps(input["part_hm"], input["offsets"], self.max_parts)
-        vals, inds = self.associate(xs, ys, exs, eys, scores, p_scores, ct, dt)
+        ct: float = self.args.conf_threshold
+        dt: float = self.args.decoder_dist_thresh * min(out_w, out_h)
 
-        return NotImplementedError
+        # (B, K, _)
+        locs, scores, labels = self.decode_heatmaps(input["anchor_hm"], input["offsets"], self.max_objects)
+        
+        # (B, P, _)
+        plocs, p_scores, p_labels, orgs = self.decode_heatmaps(input["part_hm"], input["offsets"], self.max_parts)
+        vals, inds = self.associate(locs, orgs)  # (B, P)
+
+        annotations = []  # (B,)
+        for b in range(input.size(0)):
+            map = defaultdict(list)
+
+            for p in range(self.max_parts):
+                a = inds[b, p].item()
+                if scores[b, a].item() >= ct and p_scores[b, p].item() >= ct and vals[b, p].item() <= dt:
+                    map[a].append(p)
+            
+            annotation = ImageAnnotation(
+                image_path=f"batch_{b}",
+                objects=[
+                    Object(
+                        name=self.label_map[labels[b, s].item()], 
+                        anchor=Keypoint(
+                            kind=self.anchor_name,
+                            x=locs[b, s, 0].item(), y=locs[b, s, 1].item(),
+                            score=scores[b, s].item()), 
+                        parts=[Keypoint(
+                            kind=self.part_map[p_labels[b, p].item()],
+                            x=plocs[b, p, 0].item(), y=plocs[b, p, 1].item(),
+                            score=p_scores[b, p].item()) for p in ps]
+                    ) for s, ps in map.items()],
+                img_size=None)
+
+            annotations.append(annotation.resize((out_w, out_h), (in_w, in_h)))
+
+        return annotations
 
     # output: (B, M+N+4, H/R, W/R), see network.py
     def __call__(self, outputs, conf_thresh=None, dist_thresh=None, return_metadata=False):
@@ -124,7 +139,7 @@ class Decoder:
         origins = origins.unsqueeze(1).expand(-1, self.max_objects, -1, -1)  # (B, K, P, 2)
 
         sq_distance = torch.hypot(*torch.unbind(origins - anchor_pos, dim=-1))  # (B, K, P)
-        (min_vals, min_inds) = sq_distance.min(dim=1)  # (B, P)
+        min_vals, min_inds = sq_distance.min(dim=1)  # (B, P)
         min_vals = min_vals < (dist_thresh * min(out_w, out_h))  # (B, P)
 
         # Tensor to dynamic array of annotations
