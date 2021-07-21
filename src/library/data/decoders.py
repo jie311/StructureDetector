@@ -5,7 +5,7 @@ from collections import defaultdict
 
 
 class Decoder:
-
+    
     def __init__(self, args):
         self.label_map = args._r_labels
         self.part_map = args._r_parts
@@ -17,11 +17,11 @@ class Decoder:
         self.max_parts = args.max_parts  # P
 
     def decode_heatmaps(self, heatmaps: Tensor, offsets: Tensor, max_objects: int, embeddings: Tensor = None):
-        heatmaps = clamped_sigmoid(heatmaps)  # (B, C, H/R, W/R)
-        heatmaps = nms(heatmaps)  # (B, C, H/R, W/R)
+        heatmaps = nms(clamped_sigmoid(heatmaps))  # (B, C, H/R, W/R)
         scores, inds, labels, ys, xs = topk(heatmaps, k=max_objects)  # (B, K)
         offsets = transpose_and_gather(offsets, inds)  # (B, K, 2)
-        locs = torch.stack((xs, ys), dim=2) + offsets  # (B, K, 2)
+        locs = torch.stack((xs, ys), dim=2)  # (B, K, 2)
+        locs += offsets  # (B, K, 2)
 
         if embeddings is not None:
             offsets = transpose_and_gather(embeddings, inds)
@@ -38,16 +38,16 @@ class Decoder:
         sq_distance = torch.hypot(*torch.unbind(orgs - locs, dim=-1))  # (B, K, P)
         vals, inds = sq_distance.min(dim=1)  # (B, P)
 
-        maps = []
+        mapping: list[dict[int, list[int]]] = []
         for b in range(input.size(0)):
             map = defaultdict(list)
             for p in range(self.max_parts):
                 a = inds[b, p].item()
                 if scores[b, a].item() >= ct and p_scores[b, p].item() >= ct and vals[b, p].item() <= dt:
                     map[a].append(p)
-            maps.append(map)
+            mapping.append(map)
 
-        return maps
+        return mapping
 
     def decode(self, input: Tensor):
         out_h, out_w = input["anchor_hm"].shape[2:]  # H/R, W/R
