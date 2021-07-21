@@ -63,10 +63,7 @@ class Trainer:
     def train(self):
         for epoch in tqdm(range(self.args.epochs), desc="Training", unit="epoch"):
             self.train_epoch()
-
-            if epoch % 2 == 0:
-                self.valid()
-
+            if epoch % 2 == 0: self.valid()
             self.writer.flush()
 
     def train_epoch(self):

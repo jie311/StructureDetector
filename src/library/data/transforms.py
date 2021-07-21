@@ -1,8 +1,7 @@
 from ..utils import *
+import torch
 import torchvision.transforms as torchtf
 import torchvision.transforms.functional as F
-import PIL
-import torch
 
 
 class RandomHorizontalFlip:
@@ -12,9 +11,9 @@ class RandomHorizontalFlip:
 
     def __call__(self, input, target):
         if torch.randn(1).item() < self.prob:
-            return (F.hflip(input), hflip_annotation(target, input.size))
+            return F.hflip(input), hflip_annotation(target, input.size)
         else:
-            return (input, target)
+            return input, target
 
     def __repr__(self):
         return f"RandomHorizontalFlip(prob: {self.prob})"
@@ -27,9 +26,9 @@ class RandomVerticalFlip:
 
     def __call__(self, input, target):
         if torch.randn(1).item() < self.prob:
-            return (F.vflip(input), vflip_annotation(target, input.size))
+            return F.vflip(input), vflip_annotation(target, input.size)
         else:
-            return (input, target)
+            return input, target
 
     def __repr__(self):
         return f"RandomVerticalFlip(prob: {self.prob})"
@@ -45,7 +44,7 @@ class RandomColorJitter:
             hue=hue)
 
     def __call__(self, input, target):
-        return (self.transform(input), target)
+        return self.transform(input), target
 
     def __repr__(self):
         return f"RandomColorJitter(brightness: {self.transform.brightness}, contrast: {self.transform.contrast}, saturation: {self.transform.saturation}, hue: {self.transform.hue})"
@@ -57,7 +56,7 @@ class Resize:
 
     def __init__(self, size):
         if isinstance(size, int):
-            self.width, self.height = (size, size)
+            self.width, self.height = size, size
         elif isinstance(size, tuple):
             self.width, self.height = size
         else:
@@ -67,7 +66,7 @@ class Resize:
     def __call__(self, input, target):
         image = F.resize(input, (self.height, self.width))
         annotation = resize_annotation(target, input.size, (self.width, self.height))
-        return (image, annotation)
+        return image, annotation
 
     def __repr__(self):
         return f"Resize(width: {self.width}, height: {self.height})"
@@ -92,7 +91,7 @@ class RandomResize:
         image = F.resize(input, (height, width))
         annotation = target.resize(input.size, (width, height))
 
-        return (image, annotation)
+        return image, annotation
 
     def __repr__(self):
         return f"RandomResize(ratios: {self.ratios}, img_width: {self.width}, img_height: {self.height})"
@@ -120,7 +119,7 @@ class Normalize:
 
     def __call__(self, input, target):
         output = F.to_tensor(input)  # input is normalized in [0, 1]
-        return (self.transform(output), target)
+        return self.transform(output), target
 
     def __repr__(self):
         return f"Normalize(mean: {self.transform.mean}, std: {self.transform.std})"
@@ -137,13 +136,13 @@ class Encode:
         self.sigma_gauss = args.sigma_gauss
 
     def __call__(self, input, target):
-        (img_h, img_w) = input.shape[-2:]
+        img_h, img_w = input.shape[-2:]
         out_w, out_h = int(img_w / self.down_ratio), int(img_h / self.down_ratio)
 
         kp_idx = 0
 
         sigma = self.sigma_gauss * min(out_w, out_h) / 3
-        (Y, X) = torch.meshgrid(torch.arange(out_h), torch.arange(out_w))
+        Y, X = torch.meshgrid(torch.arange(out_h), torch.arange(out_w))
 
         heatmaps = torch.zeros(len(self.labels) + len(self.parts), out_h, out_w)
         anchor_inds = torch.zeros(self.max_objects, dtype=torch.long)
@@ -225,9 +224,7 @@ class TrainAugmentation:
         ])
 
     def trigger_random_resize(self):
-        if self.args.no_augmentation:
-            return
-
+        if self.args.no_augmentation: return
         resize_ratio = self.ratios[torch.randint(len(self.ratios), (1,)).item()]
         width = int(resize_ratio * self.args.width)
         height = int(resize_ratio * self.args.height)
